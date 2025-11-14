@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fire & Ice Duo</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0e13; color:#e6e6e6; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .wrap { display:flex; flex-direction:column; height:100%; }
+    header { padding:10px 14px; display:flex; gap:10px; align-items:center; background:#0f131a; border-bottom:1px solid #1b2330; }
+    header h1 { font-size:16px; margin:0; font-weight:700; letter-spacing:.4px; }
+    header .btn { background:#1a2230; border:1px solid #293449; color:#d7e3ff; padding:8px 10px; border-radius:10px; cursor:pointer; font-weight:600; }
+    header .btn:hover { filter:brightness(1.1); }
+    #hud { margin-left:auto; display:flex; gap:14px; align-items:center; font-size:13px; color:#b9c7e6; }
+    #game { width:100%; height:100%; display:block; background:radial-gradient(1200px 500px at 50% -200px, rgba(60,120,255,.12), rgba(0,0,0,0)) , #0b0e13; }
+    footer { padding:8px 14px; font-size:12px; color:#91a3c5; background:#0f131a; border-top:1px solid #1b2330; }
+    a { color:#9ed0ff; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🔥 Fire & Ice Duo</h1>
+      <button id="btnPlay" class="btn">Play / Pause (P)</button>
+      <button id="btnReset" class="btn">Restart Level (R)</button>
+      <button id="btnNext" class="btn">Skip → (N)</button>
+      <div id="hud"></div>
+    </header>
+    <canvas id="game" width="960" height="540" aria-label="Game canvas"></canvas>
+    <footer>
+      Controls — Player 🔥 (Arrows) • Player ❄️ (WASD). Jump: ⬆ / W. Reach your matching door and collect your gems. Fire dies in water, Ice dies in lava. Both must finish to advance.
+    </footer>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const btnPlay = document.getElementById('btnPlay');
+  const btnReset = document.getElementById('btnReset');
+  const btnNext = document.getElementById('btnNext');
+
+  // --- Utility --------------------------------------------------------------
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const sign = (n) => (n>0) - (n<0);
+
+  // --- Level format ---------------------------------------------------------
+  // Legend (per char, 32x32 tiles):
+  // # = wall, . = empty, ~ = water, ^ = lava, f = fire gem, i = ice gem,
+  // F = fire start, I = ice start, D = dual door (ignored),
+  // X = fire door, O = ice door, = spring, * = platform (one-way from below)
+  // s = switch (toggles gates), | = gate (solid when gateOn = true)
+
+  const levels = [
+    {
+      name: "Training Grounds",
+      tiles: [
+        "############################################",
+        "#.............f..............i............X#",
+        "#..........................####.............#",
+        "#..............#####.......................#",
+        "#.............#.....#......................#",
+        "#....F........#..^..#...............O......#",
+        "#.............#.....#......................#",
+        "#.............#####.#......................#",
+        "#....................#.....................#",
+        "#....................#.....................#",
+        "#....................#.....................#",
+        "#..............~~~~..#.....................#",
+        "#....................#.....................#",
+        "#....................#.....................#",
+        "#....................#.....................#",
+        "############################################",
+      ],
+    },
+    {
+      name: "Gate Puzzle",
+      tiles: [
+        "############################################",
+        "#F.....................|..................X#",
+        "#...........#####......|......#####........#",
+        "#.....f.....#...#......|......#...#........#",
+        "#...........# s #......|......# s #........#",
+        "#.....^.....#####......|......#####.....i..#",
+        "#.....................................I....#",
+        "#~~~~~~~~~~~~~~~..................~~~~~~~..#",
+        "#.................##############..........O#",
+        "#.........................................#",
+        "#.............................*...........#",
+        "#.........................*...............#",
+        "#..............*..........................#",
+        "#.........................................#",
+        "#.........................................#",
+        "############################################",
+      ],
+    },
+  ];
+
+  // --- Game state -----------------------------------------------------------
+  const tileSize = 32; // px
+  const world = { levelIndex: 0, gateOn: true, running: false };
+
+  const keys = new Map();
+  const K = {
+    LEFT: 'ArrowLeft', RIGHT: 'ArrowRight', UP: 'ArrowUp',
+    A:'a', D:'d', W:'w',
+    P:'p', R:'r', N:'n'
+  };
+
+  const makePlayer = (kind, x, y) => ({
+    kind, // 'fire' | 'ice'
+    x, y, w: 24, h: 30,
+    vx:0, vy:0,
+    onGround:false,
+    gems:0,
+    finished:false,
+  });
+
+  let players = [];
+  let gemTotals = { fire:0, ice:0 };
+
+  function resetLevel(idx = world.levelIndex) {
+    const L = levels[idx];
+    world.levelIndex = idx; world.gateOn = true; world.running = true;
+    players = [];
+    gemTotals = { fire:0, ice:0 };
+
+    for (let y=0; y<L.tiles.length; y++) {
+      for (let x=0; x<L.tiles[y].length; x++) {
+        const c = L.tiles[y][x];
+        if (c==='F') players.push(makePlayer('fire', x*tileSize+4, y*tileSize+2));
+        if (c==='I') players.push(makePlayer('ice',  x*tileSize+4, y*tileSize+2));
+        if (c==='f') gemTotals.fire++;
+        if (c==='i') gemTotals.ice++;
+      }
+    }
+    if (!players.find(p=>p.kind==='fire')) players.push(makePlayer('fire', 64,64));
+    if (!players.find(p=>p.kind==='ice'))  players.push(makePlayer('ice',  96,64));
+  }
+
+  // --- Collision helpers ----------------------------------------------------
+  function tileAt(px, py) {
+    const L = levels[world.levelIndex];
+    const tx = Math.floor(px / tileSize);
+    const ty = Math.floor(py / tileSize);
+    if (ty<0 || ty>=L.tiles.length || tx<0 || tx>=L.tiles[0].length) return '#';
+    return L.tiles[ty][tx];
+  }
+  const isSolid = (t) => t === '#' || (t==='|' && world.gateOn) || t==='X' || t==='O';
+  const isOneWay = (t) => t === '*';
+
+  // --- Physics --------------------------------------------------------------
+  const GRAV = 0.45, MAX_X = 3.4, ACCEL = 0.5, FRICTION = 0.85, JUMP = 9.2;
+
+  function moveAndCollide(p) {
+    // Horizontal input
+    const moveLeft = p.kind==='fire' ? keys.get(K.LEFT) : keys.get(K.A);
+    const moveRight= p.kind==='fire' ? keys.get(K.RIGHT): keys.get(K.D);
+    const jumpKey = p.kind==='fire' ? keys.get(K.UP)   : keys.get(K.W);
+
+    if (moveLeft)  p.vx -= ACCEL;
+    if (moveRight) p.vx += ACCEL;
+    p.vx = clamp(p.vx, -MAX_X, MAX_X);
+
+    // Gravity
+    p.vy += GRAV;
+
+    // Jump
+    if (jumpKey && p.onGround) { p.vy = -JUMP; p.onGround = false; }
+
+    // Horizontal collide
+    p.x += p.vx;
+    if (p.vx !== 0) {
+      const dir = sign(p.vx);
+      const aheadX = dir>0 ? p.x+p.w : p.x;
+      const yTop = p.y+2, yMid = p.y+p.h/2, yBot = p.y+p.h-2;
+      if (isSolid(tileAt(aheadX, yTop)) || isSolid(tileAt(aheadX, yMid)) || isSolid(tileAt(aheadX, yBot))) {
+        p.x = Math.floor((aheadX)/tileSize)*tileSize - (dir>0 ? p.w : -1);
+        p.vx = 0;
+      }
+    }
+
+    // Vertical collide
+    p.y += p.vy;
+    p.onGround = false;
+    if (p.vy !== 0) {
+      const dir = sign(p.vy);
+      const aheadY = dir>0 ? p.y+p.h : p.y;
+      const xL = p.x+4, xM = p.x+p.w/2, xR = p.x+p.w-4;
+      let hitSolid = (t)=> isSolid(t);
+      // One-way platforms only collide when falling and crossing from above
+      if (dir>0) {
+        const tL = tileAt(xL, aheadY), tM = tileAt(xM, aheadY), tR = tileAt(xR, aheadY);
+        const oneway = isOneWay(tL) || isOneWay(tM) || isOneWay(tR);
+        if (oneway) {
+          const prevY = aheadY - p.vy; // previous bottom
+          const tileY = Math.floor(aheadY / tileSize) * tileSize;
+          if (prevY <= tileY) { // crossed the top surface this frame
+            p.y = tileY - p.h; p.vy = 0; p.onGround = true; return;
+          }
+        }
+        hitSolid = (t) => isSolid(t) || isOneWay(t);
+      }
+      if (hitSolid(tileAt(xL, aheadY)) || hitSolid(tileAt(xM, aheadY)) || hitSolid(tileAt(xR, aheadY))) {
+        if (dir>0) { p.y = Math.floor(aheadY/tileSize)*tileSize - p.h; p.onGround = true; }
+        else { p.y = Math.floor((aheadY)/tileSize+1)*tileSize; }
+        p.vy = 0;
+      }
+    }
+
+    // Friction ground/air
+    p.vx *= p.onGround ? FRICTION : 0.98;
+
+    // Interactions
+    handleInteractions(p);
+  }
+
+  function handleInteractions(p) {
+    const c1 = tileAt(p.x+p.w/2, p.y+p.h/2);
+
+    // Hazards
+    if (c1 === '^' && p.kind==='ice') death(p);
+    if (c1 === '~' && p.kind==='fire') death(p);
+
+    // Gems
+    const L = levels[world.levelIndex];
+    const gx = Math.floor((p.x+p.w/2)/tileSize);
+    const gy = Math.floor((p.y+p.h/2)/tileSize);
+    const ch = L.tiles[gy][gx];
+    if (p.kind==='fire' && ch==='f') { L.tiles[gy] = replaceAt(L.tiles[gy], gx, '.'); p.gems++; }
+    if (p.kind==='ice'  && ch==='i') { L.tiles[gy] = replaceAt(L.tiles[gy], gx, '.'); p.gems++; }
+
+    // Switches toggle gate
+    if (ch==='s') world.gateOn = !world.gateOn;
+
+    // Doors
+    if (ch==='X' && p.kind==='fire') p.finished = true;
+    if (ch==='O' && p.kind==='ice')  p.finished = true;
+  }
+
+  function replaceAt(str, idx, ch) { return str.substring(0,idx) + ch + str.substring(idx+1); }
+
+  function death(p){
+    // respawn to start (simple)
+    const L = levels[world.levelIndex];
+    for (let y=0; y<L.tiles.length; y++) {
+      for (let x=0; x<L.tiles[y].length; x++) {
+        const c = L.tiles[y][x];
+        if ((c==='F' && p.kind==='fire') || (c==='I' && p.kind==='ice')) {
+          p.x = x*tileSize+4; p.y = y*tileSize+2; p.vx=0; p.vy=0; p.finished=false; return;
+        }
+      }
+    }
+  }
+
+  // --- Rendering ------------------------------------------------------------
+  function draw() {
+    const L = levels[world.levelIndex];
+
+    // Auto-resize to fit container (preserve aspect)
+    const rect = canvas.getBoundingClientRect();
+    const targetW = rect.width, targetH = rect.height; // CSS size already full
+    // Clear background layer with a subtle vignette handled by CSS
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // Parallax backdrop
+    ctx.save();
+    ctx.globalAlpha = 0.20;
+    const g1 = ctx.createLinearGradient(0,0,0,canvas.height);
+    g1.addColorStop(0,   '#0b1527');
+    g1.addColorStop(1.0, '#0b0e13');
+    ctx.fillStyle = g1; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.restore();
+
+    // Camera follows midpoint of players
+    const midX = (players[0].x + players[1].x)/2;
+    const midY = (players[0].y + players[1].y)/2;
+    const cam = { x: clamp(midX - canvas.width/2, 0, L.tiles[0].length*tileSize - canvas.width),
+                  y: clamp(midY - canvas.height/2, 0, L.tiles.length*tileSize - canvas.height) };
+
+    ctx.save();
+    ctx.translate(-cam.x, -cam.y);
+
+    // Tiles
+    for (let y=0; y<L.tiles.length; y++) {
+      for (let x=0; x<L.tiles[y].length; x++) {
+        const t = L.tiles[y][x];
+        const px = x*tileSize, py = y*tileSize;
+        switch (t) {
+          case '#': drawBlock(px,py,"#253043"); break;
+          case '|': drawBlock(px,py, world.gateOn? "#4a5a80" : "#1d2637", world.gateOn?1:0.25); break;
+          case '~': drawLiquid(px,py, '#67d4ff'); break;
+          case '^': drawLiquid(px,py, '#ff6b3d'); break;
+          case '*': drawPlatform(px,py); break;
+          case 's': drawSwitch(px,py); break;
+          case 'f': drawGem(px+16,py+16,'fire'); break;
+          case 'i': drawGem(px+16,py+16,'ice'); break;
+          case 'X': drawDoor(px,py,'fire'); break;
+          case 'O': drawDoor(px,py,'ice'); break;
+        }
+      }
+    }
+
+    // Players
+    for (const p of players) drawPlayer(p);
+
+    ctx.restore();
+
+    // HUD
+    const fire = players.find(p=>p.kind==='fire');
+    const ice = players.find(p=>p.kind==='ice');
+    hud.innerHTML = `Level: <b>${levels[world.levelIndex].name}</b> · 🔥 gems ${fire.gems}/${gemTotals.fire} · ❄️ gems ${ice.gems}/${gemTotals.ice} · Gate: <b>${world.gateOn? 'ON':'OFF'}</b>`;
+
+    // Win condition
+    if (fire.finished && ice.finished) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(15,20,30,0.85)';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle = '#d7e3ff';
+      ctx.font = '28px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('Level Complete!', canvas.width/2, canvas.height/2 - 10);
+      ctx.font = '16px system-ui';
+      ctx.fillText('Press N for next level', canvas.width/2, canvas.height/2 + 18);
+      ctx.restore();
+    }
+  }
+
+  function drawBlock(x,y,fill,alpha=1){
+    ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = fill; ctx.fillRect(x,y,tileSize,tileSize);
+    ctx.strokeStyle = '#111826'; ctx.strokeRect(x+0.5,y+0.5,tileSize-1,tileSize-1);
+    ctx.restore();
+  }
+  function drawLiquid(x,y,fill){
+    ctx.save(); ctx.fillStyle = fill; ctx.fillRect(x,y+8,tileSize,tileSize-8);
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    for (let i=0;i<4;i++){ ctx.fillRect(x+i*8, y+6, 6, 2); }
+    ctx.restore();
+  }
+  function drawPlatform(x,y){
+    ctx.save(); ctx.fillStyle = '#32415e'; ctx.fillRect(x,y+22,tileSize,6);
+    ctx.restore();
+  }
+  function drawSwitch(x,y){
+    ctx.save();
+    ctx.fillStyle = '#1e2637'; ctx.fillRect(x+8,y+8,16,16);
+    ctx.fillStyle = world.gateOn? '#ffb86c' : '#8be9fd';
+    ctx.fillRect(x+10,y+10,12,12);
+    ctx.restore();
+  }
+  function drawDoor(x,y,kind){
+    ctx.save();
+    ctx.strokeStyle = '#101626'; ctx.lineWidth=2; ctx.fillStyle = kind==='fire'? '#ff7a5c' : '#69d3ff';
+    ctx.fillRect(x+6,y+6, tileSize-12, tileSize-6);
+    ctx.strokeRect(x+6,y+6, tileSize-12, tileSize-6);
+    ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(x+10,y+10, tileSize-20, tileSize-12);
+    ctx.restore();
+  }
+  function drawGem(x,y,kind){
+    ctx.save(); ctx.translate(x,y);
+    ctx.fillStyle = kind==='fire'? '#ffad6b' : '#9ee7ff';
+    ctx.beginPath();
+    ctx.moveTo(0,-10); ctx.lineTo(10,0); ctx.lineTo(0,10); ctx.lineTo(-10,0); ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.stroke();
+    ctx.restore();
+  }
+  function drawPlayer(p){
+    ctx.save(); ctx.translate(p.x, p.y);
+    const grad = ctx.createLinearGradient(0,0,0,p.h);
+    if (p.kind==='fire') { grad.addColorStop(0,'#ff9a6b'); grad.addColorStop(1,'#ff5a2f'); }
+    else { grad.addColorStop(0,'#9fe1ff'); grad.addColorStop(1,'#59c3ff'); }
+    ctx.fillStyle = grad; ctx.strokeStyle = '#0e1422';
+    // body
+    ctx.fillRect(0,0,p.w,p.h);
+    ctx.strokeRect(0.5,0.5,p.w-1,p.h-1);
+    // eyes
+    ctx.fillStyle = '#0b0e13';
+    ctx.fillRect(6,10,4,6); ctx.fillRect(p.w-10,10,4,6);
+    // feet shadow
+    ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.fillRect(0,p.h-3,p.w,3);
+    ctx.restore();
+  }
+
+  // --- Game Loop ------------------------------------------------------------
+  let last = 0; function loop(ts){
+    if (!world.running) { requestAnimationFrame(loop); return draw(); }
+    const dt = (ts-last)/16.67; last = ts;
+
+    for (const p of players) moveAndCollide(p);
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // --- Input ----------------------------------------------------------------
+  addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    keys.set(e.key, true); keys.set(k, true);
+    if (k===K.P) toggleRun();
+    if (k===K.R) resetLevel();
+    if (k===K.N) nextLevel();
+  });
+  addEventListener('keyup', (e) => { keys.set(e.key, false); keys.set(e.key.toLowerCase(), false); });
+
+  btnPlay.onclick = toggleRun; btnReset.onclick=()=>resetLevel(); btnNext.onclick=()=>nextLevel();
+
+  function toggleRun(){ world.running = !world.running; }
+  function nextLevel(){
+    const next = (world.levelIndex+1) % levels.length; resetLevel(next);
+  }
+
+  // --- Responsive canvas backing store scaling ------------------------------
+  function resize(){
+    const dpr = window.devicePixelRatio || 1;
+    const { clientWidth:w, clientHeight:h } = canvas;
+    const bw = Math.max(640, w), bh = Math.max(360, h);
+    canvas.width = Math.floor(bw * dpr);
+    canvas.height= Math.floor(bh * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  new ResizeObserver(resize).observe(canvas);
+  addEventListener('orientationchange', resize);
+
+  // --- Boot -----------------------------------------------------------------
+  resetLevel(0);
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
